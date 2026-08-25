@@ -1,8 +1,9 @@
 import torch
-from fkguidance import PositiveRewardMLP, TerminalPotential, anchor_probabilities, binary_datasets, fit_guidance
+from fkguidance import PositiveRewardMLP, Potential, anchor_probabilities, binary_datasets, fit_guidance
+from fkguidance.guidance import _h_dataset
 
 
-class CoordinatePotential(TerminalPotential):
+class CoordinatePotential(Potential):
     def raw_potential(self, x):
         return x[:, 0]
 
@@ -13,6 +14,26 @@ def test_anchor_probabilities_mix_uniform_and_potential_bias():
     assert torch.isclose(probabilities.sum(), torch.tensor(1.0))
     assert torch.all(probabilities >= 0.5 / 3)
     assert probabilities[2] > probabilities[1] > probabilities[0]
+
+
+def test_h_dataset_includes_the_exact_terminal_condition():
+    terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
+
+    def forward_noise(values, times, context):
+        return values + times[:, None]
+
+    def continue_from(states, times, n_continuations, context):
+        return states[:, None].expand(-1, n_continuations, -1)
+
+    dataset = _h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
+                         n_states=10, n_continuations=2, gamma=1.0, beta=0.5, eta=1.0,
+                         time_group_size=3, device="cpu", seed=0, split="train")
+    states, times, h_targets = dataset.tensors
+    terminal = times == 1
+
+    assert terminal.sum() == 1
+    assert torch.allclose(h_targets[terminal], states[terminal, 0].exp())
+    assert len(times.unique()) == 4
 
 
 def test_fit_guidance_uses_independent_continuations():
@@ -37,7 +58,7 @@ def test_fit_guidance_uses_independent_continuations():
         n_states=30,
         n_continuations=3,
         training_kwargs={"n_epochs": 2, "batch_size": 8, "learning_rate": 1e-3},
-        batch_size=10,
+        time_group_size=10,
     )
     assert isinstance(potential, CoordinatePotential)
     assert results["reward"]["n_continuations"] == 3
