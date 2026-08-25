@@ -29,7 +29,7 @@ def evaluate(model: torch.nn.Module, dataset: Dataset, batch_size: int, loss_fn:
 def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Dataset, *, n_epochs: int = 100,
           batch_size: int = 128, learning_rate: float = 1e-3, weight_decay: float = 1e-4,
           learning_rate_half_life: float = 32.0, loss_fn: Callable = torch.nn.functional.mse_loss,
-          device: str | torch.device = "cpu", seed: int = 0) -> dict[str, Any]:
+          device: str | torch.device = "cpu", seed: int = 0, label: str = "model") -> dict[str, Any]:
     """Train a model and restore its best validation state."""
     if min(n_epochs, batch_size) <= 0 or min(len(train_dataset), len(validation_dataset)) <= 0:
         raise ValueError("epochs, batch size, and dataset sizes must be positive")
@@ -42,6 +42,7 @@ def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Da
                         generator=torch.Generator().manual_seed(seed))
     history = {"train_loss": [], "validation_loss": [], "gradient_norm": []}
     best_loss, best_epoch, best_state = math.inf, 0, None
+    log_every = max(5, math.ceil(n_epochs / 8))
 
     for epoch in range(n_epochs):
         model.train()
@@ -66,9 +67,9 @@ def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Da
         if validation_loss < best_loss:
             best_loss, best_epoch = validation_loss, epoch + 1
             best_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
-        if (epoch + 1) % 5 == 0 or epoch + 1 == n_epochs:
-            logger.info("training epoch %d/%d: train_loss=%.6g, validation_loss=%.6g, grad_norm=%.6g, lr=%.3g",
-                        epoch + 1, n_epochs, train_loss, validation_loss, history["gradient_norm"][-1],
+        if (epoch + 1) % log_every == 0 or epoch + 1 == n_epochs:
+            logger.info("%s fit | epoch %d/%d | train_loss=%.6g | validation_loss=%.6g | grad_norm=%.6g | lr=%.3g",
+                        label, epoch + 1, n_epochs, train_loss, validation_loss, history["gradient_norm"][-1],
                         optimizer.param_groups[0]["lr"])
         scheduler.step()
 
@@ -78,7 +79,8 @@ def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Da
 
 def select_parameters(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Dataset,
                       candidates: list[dict[str, Any]], *, n_epochs: int, loss_fn: Callable,
-                      device: str | torch.device, seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                      device: str | torch.device, seed: int,
+                      label: str = "model") -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Select training parameters from identical initial weights."""
     if not candidates:
         return {}, []
@@ -87,9 +89,9 @@ def select_parameters(model: torch.nn.Module, train_dataset: Dataset, validation
     trials = []
     for index, parameters in enumerate(candidates, 1):
         model.load_state_dict(initial_state)
-        logger.info("pilot candidate %d/%d: %s", index, len(candidates), parameters)
+        logger.info("%s pilot | candidate %d/%d | %s", label, index, len(candidates), parameters)
         history = train(model, train_dataset, validation_dataset, n_epochs=n_epochs, loss_fn=loss_fn,
-                        device=device, seed=seed, **parameters)
+                        device=device, seed=seed, label=f"{label} pilot", **parameters)
         epoch = history["best_epoch"] - 1
         trials.append({"parameters": parameters,
                        "best_epoch": history["best_epoch"],
@@ -99,5 +101,6 @@ def select_parameters(model: torch.nn.Module, train_dataset: Dataset, validation
 
     model.load_state_dict(initial_state)
     selected = min(trials, key=lambda trial: trial["validation_loss"])
-    logger.info("pilot selected %s with validation_loss=%.6g", selected["parameters"], selected["validation_loss"])
+    logger.info("%s pilot | selected %s | validation_loss=%.6g",
+                label, selected["parameters"], selected["validation_loss"])
     return dict(selected["parameters"]), trials
