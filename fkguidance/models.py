@@ -10,7 +10,8 @@ __all__ = ["PositiveRewardCNN", "PositiveRewardMLP"]
 class _TimeFeatures(torch.nn.Module):
     def __init__(self, width: int) -> None:
         super().__init__()
-        frequencies = torch.exp(torch.linspace(0, math.log(1000), width))
+        # Moderate frequencies interpolate between sampled times instead of memorizing isolated time groups.
+        frequencies = torch.exp(torch.linspace(0, math.log(32), width))
         self.register_buffer("frequencies", 2 * math.pi * frequencies, persistent=False)
 
     def forward(self, time: torch.Tensor) -> torch.Tensor:
