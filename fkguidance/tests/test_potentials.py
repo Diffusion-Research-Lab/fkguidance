@@ -1,5 +1,4 @@
 import torch
-
 from fkguidance import DensityRatioPotential, RadialSurvivalPotential, binary_datasets
 
 

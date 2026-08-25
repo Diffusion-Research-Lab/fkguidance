@@ -4,10 +4,8 @@ from collections.abc import Callable
 import logging
 import math
 from typing import Any
-
 import torch
 from torch.utils.data import Dataset, TensorDataset
-
 from .potentials import TerminalPotential
 from .training import evaluate, select_parameters, train
 

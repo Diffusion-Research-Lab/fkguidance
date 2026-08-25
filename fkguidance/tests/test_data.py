@@ -1,6 +1,5 @@
 import pytest
 import torch
-
 from fkguidance import binary_datasets, split_tensors
 
 

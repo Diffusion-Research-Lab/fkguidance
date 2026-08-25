@@ -4,7 +4,6 @@ from collections.abc import Callable
 import logging
 import math
 from typing import Any
-
 import torch
 from torch.utils.data import DataLoader, Dataset
 

@@ -1,7 +1,6 @@
 """Positive time-conditioned reward models."""
 
 import math
-
 import torch
 
 
