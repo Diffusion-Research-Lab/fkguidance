@@ -10,7 +10,7 @@ from .potentials import Potential
 from .training import evaluate, select_parameters, train
 
 
-__all__ = ["anchor_probabilities", "fit_guidance", "make_guidance"]
+__all__ = ["anchor_probabilities", "fit_guidance", "make_guidance", "tune_guidance_scale"]
 
 
 logger = logging.getLogger(__name__)
@@ -182,3 +182,28 @@ def make_guidance(reward_model: torch.nn.Module, scale: float = 1.0) -> Callable
             return scale * torch.autograd.grad(log_reward.sum(), inputs)[0]
 
     return guidance
+
+
+def tune_guidance_scale(scales, run_scale: Callable[[float], Any], metric: str | Callable[[Any], float], *,
+                        direction: str = "min", return_trials: bool = False) -> tuple[float, Any]:
+    """Run a discrete scale search and return the best run or every trial."""
+    scales = tuple(float(scale) for scale in scales)
+    if not scales or len(scales) != len(set(scales)) or any(not math.isfinite(scale) for scale in scales):
+        raise ValueError("scales must be a non-empty sequence of distinct finite values")
+    if direction not in {"min", "max"}:
+        raise ValueError("direction must be 'min' or 'max'")
+
+    score = (lambda result: result[metric]) if isinstance(metric, str) else metric
+    trials = {}
+    best_scale, best_result, best_value = scales[0], None, None
+    for scale in scales:
+        result = run_scale(scale)
+        value = float(score(result))
+        if not math.isfinite(value):
+            raise ValueError(f"metric is not finite for guidance scale {scale:g}")
+        if return_trials:
+            trials[scale] = result
+        if best_value is None or (value < best_value if direction == "min" else value > best_value):
+            best_scale, best_result, best_value = scale, result, value
+
+    return best_scale, trials if return_trials else best_result

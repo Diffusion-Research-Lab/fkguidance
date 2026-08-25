@@ -1,5 +1,5 @@
 import torch
-from fkguidance import PositiveRewardMLP, Potential, anchor_probabilities, binary_datasets, fit_guidance
+from fkguidance import PositiveRewardMLP, Potential, anchor_probabilities, binary_datasets, fit_guidance, tune_guidance_scale
 from fkguidance.guidance import _h_dataset
 
 
@@ -14,6 +14,16 @@ def test_anchor_probabilities_mix_uniform_and_potential_bias():
     assert torch.isclose(probabilities.sum(), torch.tensor(1.0))
     assert torch.all(probabilities >= 0.5 / 3)
     assert probabilities[2] > probabilities[1] > probabilities[0]
+
+
+def test_tune_guidance_scale_selects_a_metric_and_optionally_returns_trials():
+    best_scale, best = tune_guidance_scale((0.5, 1.0, 2.0), lambda scale: {"error": abs(scale - 1)}, "error")
+    _, trials = tune_guidance_scale((0.5, 1.0, 2.0), lambda scale: scale, lambda scale: scale,
+                                    direction="max", return_trials=True)
+
+    assert best_scale == 1.0
+    assert best == {"error": 0.0}
+    assert trials == {0.5: 0.5, 1.0: 1.0, 2.0: 2.0}
 
 
 def test_h_dataset_includes_the_exact_terminal_condition():
