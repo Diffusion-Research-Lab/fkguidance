@@ -71,15 +71,19 @@ class DensityRatioPotential(Potential):
 
     Reference samples have label one. With equal class priors, the classifier logit estimates
     log(p_reference / p_generated), or its relative-density-ratio counterpart when alpha is given.
+    Optional Gaussian feature noise estimates the corresponding ratio of smoothed distributions.
     """
 
     def __init__(self, embedding: torch.nn.Module, output_dim: int, relative_alpha: float | None = None,
-                 hidden_dim: int = 128, **kwargs) -> None:
+                 smoothing_std: float = 0.0, hidden_dim: int = 128, **kwargs) -> None:
         super().__init__(**kwargs)
         if relative_alpha is not None and not 0 < relative_alpha < 1:
             raise ValueError("relative_alpha must lie in (0, 1)")
+        if not math.isfinite(smoothing_std) or smoothing_std < 0:
+            raise ValueError("smoothing_std must be finite and non-negative")
         self.embedding = embedding
         self.relative_alpha = relative_alpha
+        self.smoothing_std = float(smoothing_std)
         self.head = torch.nn.Sequential(torch.nn.Linear(output_dim, hidden_dim), torch.nn.SiLU(),
                                         torch.nn.Linear(hidden_dim, 1), torch.nn.Flatten(0))
 
@@ -95,7 +99,8 @@ class DensityRatioPotential(Potential):
 
         return TensorDataset(torch.cat(features), torch.cat(targets))
 
-    def _classification_dataset(self, dataset: TensorDataset, seed: int) -> TensorDataset:
+    def _classification_dataset(self, dataset: TensorDataset, feature_scale: torch.Tensor,
+                                seed: int) -> TensorDataset:
         """Build a balanced reference-versus-generated-or-mixture dataset."""
         features, targets = dataset.tensors
         reference, generated = features[targets.bool()], features[~targets.bool()]
@@ -112,7 +117,12 @@ class DensityRatioPotential(Potential):
             negative = torch.cat((reference[:n_reference], generated[:n_samples - n_reference]))
             negative = negative[torch.randperm(n_samples, generator=generator)]
 
-        return TensorDataset(torch.cat((negative, reference)),
+        features = torch.cat((negative, reference))
+        if self.smoothing_std:
+            noise = torch.randn(features.shape, generator=generator, dtype=features.dtype)
+            features = features + self.smoothing_std * feature_scale * noise
+
+        return TensorDataset(features,
                              torch.cat((torch.zeros(n_samples), torch.ones(n_samples))))
 
     def fit(self, datasets: tuple[Dataset, Dataset, Dataset], *, training_kwargs: dict[str, Any],
@@ -120,8 +130,10 @@ class DensityRatioPotential(Potential):
             device: str | torch.device = "cpu", seed: int = 0) -> dict[str, Any]:
         """Embed the three splits, fit the ratio classifier, and report its test behavior."""
         embedded = tuple(self._embed(dataset, embedding_batch_size, device) for dataset in datasets)
+        feature_scale = embedded[0].tensors[0].std(dim=0).clamp_min(1e-6)
         train_dataset, validation_dataset, test_dataset = tuple(
-            self._classification_dataset(dataset, seed + index) for index, dataset in enumerate(embedded))
+            self._classification_dataset(dataset, feature_scale, seed + index)
+            for index, dataset in enumerate(embedded))
 
         loss_fn = torch.nn.functional.binary_cross_entropy_with_logits
         selected, trials = {}, []
@@ -156,7 +168,8 @@ class DensityRatioPotential(Potential):
         correct = (logits >= 0) == targets
         self.cpu()
 
-        return {"name": type(self).__name__, "relative_alpha": self.relative_alpha, "selected": selected,
+        return {"name": type(self).__name__, "relative_alpha": self.relative_alpha,
+                "smoothing_std": self.smoothing_std, "selected": selected,
                 "trials": trials, "training": history,
                 "test": {"loss": test_loss, "accuracy": float(correct.float().mean()),
                          "generated_accuracy": float(correct[~targets].float().mean()),
