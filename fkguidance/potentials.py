@@ -12,7 +12,7 @@ __all__ = ["DensityRatioPotential", "Potential", "RadialSurvivalPotential"]
 
 
 class Potential(torch.nn.Module, ABC):
-    """A scalar terminal potential tau, clipped before exp(gamma tau) is evaluated."""
+    """A scalar terminal potential tau used to define the F-K log reward."""
 
     def __init__(self, clip: float = 10.0) -> None:
         super().__init__()

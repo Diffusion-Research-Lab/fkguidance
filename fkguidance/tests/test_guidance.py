@@ -1,6 +1,7 @@
+import math
 import torch
-from fkguidance import PositiveRewardMLP, Potential, binary_datasets, fit_guidance, terminal_probabilities, tune_guidance_scale
-from fkguidance.guidance import _h_dataset
+from fkguidance import LogRewardMLP, Potential, binary_datasets, fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
+from fkguidance.guidance import _log_h_dataset, _log_reward_loss
 
 
 class CoordinatePotential(Potential):
@@ -26,24 +27,49 @@ def test_tune_guidance_scale_selects_a_metric_and_optionally_returns_trials():
     assert trials == {0.5: 0.5, 1.0: 1.0, 2.0: 2.0}
 
 
-def test_h_dataset_includes_the_exact_terminal_condition():
+def test_log_h_dataset_includes_the_exact_terminal_condition():
     terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
 
     def forward_noise(values, times, context):
         return values + times[:, None]
 
     def continue_from(states, times, n_continuations, context):
-        return states[:, None].expand(-1, n_continuations, -1)
+        return torch.stack((states, states + 2), dim=1)
 
-    dataset = _h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
-                         n_states=10, n_continuations=2, gamma=1.0, beta=0.5, eta=1.0,
-                         time_group_size=3, device="cpu", seed=0, split="train")
-    states, times, h_targets = dataset.tensors
+    dataset = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
+                             n_states=10, n_continuations=2, gamma=1.0, beta=0.5, eta=1.0,
+                             time_group_size=3, device="cpu", seed=0, split="train")
+    states, times, log_h_targets = dataset.tensors
     terminal = times == 1
 
     assert terminal.sum() == 2
-    assert torch.allclose(h_targets[terminal], states[terminal, 0].exp())
+    expected = states[:, 0].clone()
+    expected[~terminal] += torch.logsumexp(torch.tensor([0.0, 2.0]), dim=0) - math.log(2)
+    assert torch.allclose(log_h_targets, expected)
     assert len(times.unique()) == 4
+
+
+def test_log_reward_loss_targets_log_mean_exponential():
+    targets = torch.tensor([-2.0, 0.0, 1.0], requires_grad=True)
+    prediction = (torch.logsumexp(targets.detach(), dim=0) - math.log(len(targets))).requires_grad_()
+
+    loss = _log_reward_loss(prediction.expand_as(targets), targets)
+    prediction_gradient, target_gradient = torch.autograd.grad(loss, (prediction, targets), allow_unused=True)
+
+    assert torch.allclose(prediction_gradient, torch.zeros_like(prediction_gradient), atol=1e-6)
+    assert target_gradient is None
+    assert not torch.isclose(prediction.detach(), targets.mean())
+
+
+def test_make_guidance_differentiates_the_log_reward():
+    class QuadraticLogReward(torch.nn.Module):
+        def forward(self, x, time):
+            return x.square().sum(dim=1)
+
+    values = torch.tensor([[1.0, -2.0]])
+    guidance = make_guidance(QuadraticLogReward(), scale=0.5)
+
+    assert torch.allclose(guidance(values, torch.zeros(1)), values)
 
 
 def test_fit_guidance_uses_independent_continuations():
@@ -60,7 +86,7 @@ def test_fit_guidance_uses_independent_continuations():
 
     potential, model, results = fit_guidance(
         CoordinatePotential(),
-        PositiveRewardMLP(1, hidden_dim=8, depth=1),
+        LogRewardMLP(1, hidden_dim=8, depth=1),
         terminal_datasets,
         generated,
         forward_noise,
@@ -71,6 +97,7 @@ def test_fit_guidance_uses_independent_continuations():
         time_group_size=10,
     )
     assert isinstance(potential, CoordinatePotential)
-    assert results["reward"]["n_continuations"] == 3
-    assert results["reward"]["test_loss"] >= 0
+    assert results["log_reward"]["objective"] == "exponential_log_reward"
+    assert results["log_reward"]["n_continuations"] == 3
+    assert results["log_reward"]["test_loss"] >= 0
     assert model(torch.zeros(2, 1), torch.zeros(2)).shape == (2,)

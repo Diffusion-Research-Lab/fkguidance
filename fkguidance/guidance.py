@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 _TERMINAL_FRACTION = 0.2
 
 
+def _log_reward_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Proper loss whose population minimizer is log E[exp(target) | input]."""
+    return (torch.exp(target.detach() - prediction) + prediction).mean()
+
+
 @torch.inference_mode()
 def terminal_probabilities(potential: Potential, terminals: torch.Tensor, *, beta: float = 0.5,
                            eta: float = 1.0, batch_size: int = 1024,
@@ -35,23 +40,23 @@ def terminal_probabilities(potential: Potential, terminals: torch.Tensor, *, bet
 
 
 @torch.inference_mode()
-def _h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential: Potential,
-               forward_noise: Callable, continue_from: Callable, *, n_states: int, n_continuations: int,
-               gamma: float, beta: float, eta: float, time_group_size: int, device: str | torch.device,
-               seed: int, split: str) -> TensorDataset:
-    """Build (X_t, t, h) observations from selected terminal samples and stochastic continuations."""
+def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential: Potential,
+                   forward_noise: Callable, continue_from: Callable, *, n_states: int, n_continuations: int,
+                   gamma: float, beta: float, eta: float, time_group_size: int, device: str | torch.device,
+                   seed: int, split: str) -> TensorDataset:
+    """Build (X_t, t, log h) observations from terminal samples and stochastic continuations."""
     probabilities = terminal_probabilities(potential, terminals, beta=beta, eta=eta, device=device)
     generator = torch.Generator().manual_seed(seed)
     indices = torch.multinomial(probabilities, n_states, replacement=True, generator=generator)
 
-    # Reserve ten percent of every split for the exact terminal condition h(x, 1) = exp(gamma tau(x)).
+    # Exact terminal observations impose log h(x, 1) = gamma tau(x).
     n_terminal = max(1, int(_TERMINAL_FRACTION * n_states))
     terminal_indices, indices = indices[:n_terminal], indices[n_terminal:]
     terminal_states = terminals[terminal_indices]
     terminal_tau = potential(terminal_states.to(device)).cpu()
     states = [terminal_states.cpu()]
     times = [torch.ones(n_terminal)]
-    h_targets = [torch.exp(gamma * terminal_tau)]
+    log_h_targets = [gamma * terminal_tau]
     selected_context = None if context is None else context[indices]
 
     n_batches = math.ceil(len(indices) / time_group_size)
@@ -67,30 +72,30 @@ def _h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential:
         state = forward_noise(terminals[batch_indices], time, batch_context)
         continuations = continue_from(state, time, n_continuations, batch_context)
 
-        # Monte Carlo estimate of h(x, t) = E[exp(gamma tau(X_1)) | X_t = x].
+        # Stable Monte Carlo estimate of log h = log E[exp(gamma tau(X_1)) | X_t].
         shape = continuations.shape[:2]
         tau = potential(continuations.flatten(0, 1).to(device)).reshape(shape)
-        h_target = torch.exp(gamma * tau).mean(dim=1)
+        log_h_target = torch.logsumexp(gamma * tau, dim=1) - math.log(n_continuations)
 
         states.append(state.cpu())
         times.append(time)
-        h_targets.append(h_target.cpu())
+        log_h_targets.append(log_h_target.cpu())
 
         if batch_index % log_every == 0 or batch_index == n_batches:
-            logger.info("h targets | %s | %d/%d states", split,
+            logger.info("log h targets | %s | %d/%d states", split,
                         min(n_terminal + start + time_group_size, n_states), n_states)
 
-    return TensorDataset(torch.cat(states), torch.cat(times), torch.cat(h_targets))
+    return TensorDataset(torch.cat(states), torch.cat(times), torch.cat(log_h_targets))
 
 
-def fit_guidance(potential: Potential, reward_model: torch.nn.Module,
+def fit_guidance(potential: Potential, log_reward_model: torch.nn.Module,
                  terminal_datasets: tuple[Dataset, Dataset, Dataset], terminal_pool: torch.Tensor,
                  forward_noise: Callable, continue_from: Callable, *, context: torch.Tensor | None = None,
                  n_states: int, n_continuations: int, gamma: float = 1.0, beta: float = 0.5, eta: float = 1.0,
                  potential_kwargs: dict[str, Any] | None = None, training_kwargs: dict[str, Any],
                  pilot_kwargs: dict[str, Any] | None = None, time_group_size: int = 256,
                  device: str | torch.device = "cpu", seed: int = 0) -> tuple[Potential, torch.nn.Module, dict]:
-    """Fit tau, construct Monte Carlo targets for h, and fit the positive model h_phi."""
+    """Fit tau, construct Monte Carlo targets for log h, and fit u_phi = log h."""
     if min(len(terminal_pool), n_states, n_continuations, time_group_size) <= 0:
         raise ValueError("pool and sample counts must be positive")
     if context is not None and len(context) != len(terminal_pool):
@@ -111,7 +116,7 @@ def fit_guidance(potential: Potential, reward_model: torch.nn.Module,
         logger.info("tau | ready | %s", type(potential).__name__, extra={"core_step": True})
 
     # Keep terminal-pool splits disjoint before drawing terminal samples, states, and continuations.
-    logger.info("h targets | start | states=%d | time_group=%d | continuations/state=%d | "
+    logger.info("log h targets | start | states=%d | time_group=%d | continuations/state=%d | "
                 "gamma=%.3g | terminal_beta=%.3g | terminal_eta=%.3g", n_states, time_group_size,
                 n_continuations, gamma, beta, eta, extra={"core_step": True})
     order = torch.randperm(len(terminal_pool), generator=torch.Generator().manual_seed(seed))
@@ -124,61 +129,61 @@ def fit_guidance(potential: Potential, reward_model: torch.nn.Module,
     for split_index, (split, start, stop, count) in enumerate(split_ranges):
         indices = order[start:stop]
         split_context = None if context is None else context[indices]
-        dataset = _h_dataset(terminal_pool[indices], split_context, potential, forward_noise, continue_from,
-                             n_states=count, n_continuations=n_continuations, gamma=gamma, beta=beta, eta=eta,
-                             time_group_size=time_group_size, device=device, seed=seed + split_index, split=split)
+        dataset = _log_h_dataset(terminal_pool[indices], split_context, potential, forward_noise, continue_from,
+                                 n_states=count, n_continuations=n_continuations, gamma=gamma, beta=beta, eta=eta,
+                                 time_group_size=time_group_size, device=device, seed=seed + split_index, split=split)
         datasets.append(dataset)
 
-    logger.info("h targets | ready | train=%d | validation=%d | test=%d",
+    logger.info("log h targets | ready | train=%d | validation=%d | test=%d",
                 *(len(dataset) for dataset in datasets), extra={"core_step": True})
 
-    # A common scalar normalization improves conditioning and leaves grad log h unchanged.
-    h_scale = datasets[0].tensors[-1].mean().clamp_min(1e-8)
-    datasets = [TensorDataset(dataset.tensors[0], dataset.tensors[1], dataset.tensors[2] / h_scale)
+    # An additive center improves conditioning and leaves grad log h unchanged.
+    centering = datasets[0].tensors[-1].mean()
+    datasets = [TensorDataset(dataset.tensors[0], dataset.tensors[1], dataset.tensors[2] - centering)
                 for dataset in datasets]
 
-    loss_fn = torch.nn.functional.mse_loss
     selected, trials = {}, []
-    logger.info("h | fit | start", extra={"core_step": True})
+    logger.info("log h | fit | start", extra={"core_step": True})
 
     if pilot_kwargs is not None:
         selected, trials = select_parameters(
-            reward_model,
+            log_reward_model,
             datasets[0],
             datasets[1],
             list(pilot_kwargs["candidates"]),
             n_epochs=int(pilot_kwargs["n_epochs"]),
-            loss_fn=loss_fn,
+            loss_fn=_log_reward_loss,
             device=device,
             seed=seed,
-            label="h")
+            label="log h")
 
     parameters = {**training_kwargs, **selected}
-    history = train(reward_model, datasets[0], datasets[1], loss_fn=loss_fn, device=device, seed=seed,
-                    label="h", **parameters)
+    history = train(log_reward_model, datasets[0], datasets[1], loss_fn=_log_reward_loss, device=device, seed=seed,
+                    label="log h", **parameters)
     final_batch_size = int(parameters.get("batch_size", 128))
-    test_loss = evaluate(reward_model, datasets[2], final_batch_size, loss_fn, device)
+    test_loss = evaluate(log_reward_model, datasets[2], final_batch_size, _log_reward_loss, device)
 
-    logger.info("h | fit | done | best_epoch=%d | validation_loss=%.6g | test_loss=%.6g",
+    logger.info("log h | fit | done | best_epoch=%d | validation_loss=%.6g | test_loss=%.6g",
                 history["best_epoch"], min(history["validation_loss"]), test_loss, extra={"core_step": True})
-    reward_model.cpu()
+    log_reward_model.cpu()
 
-    return potential.cpu(), reward_model, {
+    return potential.cpu(), log_reward_model, {
         "potential": potential_results,
-        "reward": {"gamma": gamma, "terminal_beta": beta, "terminal_eta": eta,
-                   "n_states": n_states, "n_continuations": n_continuations,
-                   "terminal_fraction": _TERMINAL_FRACTION, "time_group_size": time_group_size,
-                   "normalization": float(h_scale), "selected": selected, "trials": trials,
-                   "training": history, "test_loss": test_loss},
+        "log_reward": {"objective": "exponential_log_reward", "gamma": gamma,
+                       "terminal_beta": beta, "terminal_eta": eta,
+                       "n_states": n_states, "n_continuations": n_continuations,
+                       "terminal_fraction": _TERMINAL_FRACTION, "time_group_size": time_group_size,
+                       "centering": float(centering), "selected": selected, "trials": trials,
+                       "training": history, "test_loss": test_loss},
     }
 
 
-def make_guidance(reward_model: torch.nn.Module, scale: float = 1.0) -> Callable:
-    """Return the guidance vector V(x, t) = scale * grad_x log h_phi(x, t)."""
+def make_guidance(log_reward_model: torch.nn.Module, scale: float = 1.0) -> Callable:
+    """Return the guidance vector V(x, t) = scale * grad_x u_phi(x, t)."""
     def guidance(x: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
         with torch.enable_grad():
             inputs = x.detach().requires_grad_(True)
-            log_reward = reward_model(inputs, time).clamp_min(1e-8).log()
+            log_reward = log_reward_model(inputs, time)
             return scale * torch.autograd.grad(log_reward.sum(), inputs)[0]
 
     return guidance

@@ -1,10 +1,10 @@
-"""Positive time-conditioned reward models."""
+"""Time-conditioned log-reward models."""
 
 import math
 import torch
 
 
-__all__ = ["PositiveRewardCNN", "PositiveRewardMLP"]
+__all__ = ["LogRewardCNN", "LogRewardMLP"]
 
 
 class _TimeFeatures(torch.nn.Module):
@@ -19,8 +19,8 @@ class _TimeFeatures(torch.nn.Module):
         return torch.cat((angles.sin(), angles.cos()), dim=1)
 
 
-class PositiveRewardMLP(torch.nn.Module):
-    """Positive reward model for vector states."""
+class LogRewardMLP(torch.nn.Module):
+    """Model log h for vector states."""
 
     def __init__(self, dim: int, data_scale: float | torch.Tensor = 1.0, hidden_dim: int = 128,
                  depth: int = 3) -> None:
@@ -34,8 +34,8 @@ class PositiveRewardMLP(torch.nn.Module):
         self.network = torch.nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
-        values = self.network(torch.cat((x.flatten(1) / self.data_scale, self.time_features(time)), dim=1)).flatten()
-        return torch.nn.functional.softplus(values) + 1e-6
+        return self.network(torch.cat((x.flatten(1) / self.data_scale,
+                                       self.time_features(time)), dim=1)).flatten()
 
 
 class _ResidualBlock(torch.nn.Module):
@@ -56,8 +56,8 @@ class _ResidualBlock(torch.nn.Module):
         return self.conv2(torch.nn.functional.silu(self.norm2(x))) + residual
 
 
-class PositiveRewardCNN(torch.nn.Module):
-    """Positive reward model for image or latent states."""
+class LogRewardCNN(torch.nn.Module):
+    """Model log h for image or latent states."""
 
     def __init__(self, channels: int, hidden_channels: int = 64) -> None:
         super().__init__()
@@ -78,4 +78,4 @@ class PositiveRewardCNN(torch.nn.Module):
         x = self.stem(x)
         for block in self.blocks:
             x = block(x, time)
-        return torch.nn.functional.softplus(self.head(x).flatten()) + 1e-6
+        return self.head(x).flatten()
