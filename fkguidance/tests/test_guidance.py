@@ -41,7 +41,7 @@ def test_h_dataset_includes_the_exact_terminal_condition():
     states, times, h_targets = dataset.tensors
     terminal = times == 1
 
-    assert terminal.sum() == 1
+    assert terminal.sum() == 2
     assert torch.allclose(h_targets[terminal], states[terminal, 0].exp())
     assert len(times.unique()) == 4
 

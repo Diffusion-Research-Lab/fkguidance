@@ -14,7 +14,7 @@ __all__ = ["fit_guidance", "make_guidance", "terminal_probabilities", "tune_guid
 
 
 logger = logging.getLogger(__name__)
-_TERMINAL_FRACTION = 0.1
+_TERMINAL_FRACTION = 0.2
 
 
 @torch.inference_mode()
