@@ -10,7 +10,7 @@ from .potentials import Potential
 from .training import evaluate, select_parameters, train
 
 
-__all__ = ["anchor_probabilities", "fit_guidance", "make_guidance", "tune_guidance_scale"]
+__all__ = ["fit_guidance", "make_guidance", "terminal_probabilities", "tune_guidance_scale"]
 
 
 logger = logging.getLogger(__name__)
@@ -18,9 +18,9 @@ _TERMINAL_FRACTION = 0.1
 
 
 @torch.inference_mode()
-def anchor_probabilities(potential: Potential, terminals: torch.Tensor, *, beta: float = 0.5,
-                         eta: float = 1.0, batch_size: int = 1024,
-                         device: str | torch.device = "cpu") -> torch.Tensor:
+def terminal_probabilities(potential: Potential, terminals: torch.Tensor, *, beta: float = 0.5,
+                           eta: float = 1.0, batch_size: int = 1024,
+                           device: str | torch.device = "cpu") -> torch.Tensor:
     """Mix uniform terminal sampling with a softmax biased toward large tau values."""
     if not 0 <= beta <= 1 or eta < 0:
         raise ValueError("beta must lie in [0, 1] and eta must be non-negative")
@@ -39,8 +39,8 @@ def _h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential:
                forward_noise: Callable, continue_from: Callable, *, n_states: int, n_continuations: int,
                gamma: float, beta: float, eta: float, time_group_size: int, device: str | torch.device,
                seed: int, split: str) -> TensorDataset:
-    """Build (X_t, t, h) observations from terminal anchors and stochastic continuations."""
-    probabilities = anchor_probabilities(potential, terminals, beta=beta, eta=eta, device=device)
+    """Build (X_t, t, h) observations from selected terminal samples and stochastic continuations."""
+    probabilities = terminal_probabilities(potential, terminals, beta=beta, eta=eta, device=device)
     generator = torch.Generator().manual_seed(seed)
     indices = torch.multinomial(probabilities, n_states, replacement=True, generator=generator)
 
@@ -110,10 +110,10 @@ def fit_guidance(potential: Potential, reward_model: torch.nn.Module,
     else:
         logger.info("tau | ready | %s", type(potential).__name__, extra={"core_step": True})
 
-    # Keep terminal-pool splits disjoint before drawing anchors, states, and continuations.
-    logger.info("h targets | start | states=%d | terminal=%.0f%% | time_group=%d | continuations/state=%d | "
-                "gamma=%.3g | anchor_beta=%.3g | anchor_eta=%.3g", n_states, 100 * _TERMINAL_FRACTION,
-                time_group_size, n_continuations, gamma, beta, eta, extra={"core_step": True})
+    # Keep terminal-pool splits disjoint before drawing terminal samples, states, and continuations.
+    logger.info("h targets | start | states=%d | time_group=%d | continuations/state=%d | "
+                "gamma=%.3g | terminal_beta=%.3g | terminal_eta=%.3g", n_states, time_group_size,
+                n_continuations, gamma, beta, eta, extra={"core_step": True})
     order = torch.randperm(len(terminal_pool), generator=torch.Generator().manual_seed(seed))
     pool_bounds = (0, int(0.8 * len(order)), int(0.9 * len(order)), len(order))
     state_counts = (int(0.8 * n_states), int(0.1 * n_states), n_states - int(0.9 * n_states))
@@ -165,7 +165,7 @@ def fit_guidance(potential: Potential, reward_model: torch.nn.Module,
 
     return potential.cpu(), reward_model, {
         "potential": potential_results,
-        "reward": {"gamma": gamma, "anchor_beta": beta, "anchor_eta": eta,
+        "reward": {"gamma": gamma, "terminal_beta": beta, "terminal_eta": eta,
                    "n_states": n_states, "n_continuations": n_continuations,
                    "terminal_fraction": _TERMINAL_FRACTION, "time_group_size": time_group_size,
                    "normalization": float(h_scale), "selected": selected, "trials": trials,

@@ -1,5 +1,5 @@
 import torch
-from fkguidance import PositiveRewardMLP, Potential, anchor_probabilities, binary_datasets, fit_guidance, tune_guidance_scale
+from fkguidance import PositiveRewardMLP, Potential, binary_datasets, fit_guidance, terminal_probabilities, tune_guidance_scale
 from fkguidance.guidance import _h_dataset
 
 
@@ -8,9 +8,9 @@ class CoordinatePotential(Potential):
         return x[:, 0]
 
 
-def test_anchor_probabilities_mix_uniform_and_potential_bias():
+def test_terminal_probabilities_mix_uniform_and_potential_bias():
     terminals = torch.tensor([[0.0], [1.0], [2.0]])
-    probabilities = anchor_probabilities(CoordinatePotential(), terminals, beta=0.5, eta=2.0)
+    probabilities = terminal_probabilities(CoordinatePotential(), terminals, beta=0.5, eta=2.0)
     assert torch.isclose(probabilities.sum(), torch.tensor(1.0))
     assert torch.all(probabilities >= 0.5 / 3)
     assert probabilities[2] > probabilities[1] > probabilities[0]
