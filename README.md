@@ -1,5 +1,3 @@
 # fkguidance
 
-`fkguidance` learns post-training Feynman--Kac guidance for a stochastic generative process. A user supplies a terminal potential, a generated terminal pool, forward noising, and stochastic continuation callbacks.
-
-The package deliberately contains no benchmark, pretrained model, dataset, or cluster-specific code.
+`fkguidance` learns post-training Feynman-Kac guidance for a stochastic generative process. A user supplies a terminal potential, a generated terminal pool, forward noising, and stochastic continuation callbacks.
