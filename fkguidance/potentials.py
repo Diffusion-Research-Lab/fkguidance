@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from .training import evaluate, select_parameters, train
 
 
-__all__ = ["DensityRatioPotential", "Potential", "RadialSurvivalPotential"]
+__all__ = ["DensityRatioPotential", "Potential"]
 
 
 class Potential(torch.nn.Module, ABC):
@@ -33,37 +33,6 @@ class Potential(torch.nn.Module, ABC):
         if values.shape != (len(x),):
             raise ValueError(f"potential shape {tuple(values.shape)} does not match {(len(x),)}")
         return values.clamp(-self.clip, self.clip)
-
-
-def _class_samples(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return reference and generated samples from a binary dataset."""
-    samples, targets = [], []
-    for values, labels in DataLoader(dataset, batch_size=1024):
-        samples.append(values.float())
-        targets.append(labels.bool())
-    values, labels = torch.cat(samples), torch.cat(targets)
-    return values[labels], values[~labels]
-
-
-class RadialSurvivalPotential(Potential):
-    """Use the log ratio of reference and generated radial survival functions as tau."""
-
-    def fit(self, datasets: tuple[Dataset, Dataset, Dataset], **kwargs) -> dict[str, Any]:
-        reference, generated = _class_samples(datasets[0])
-        self.register_buffer("reference_radii", reference.flatten(1).norm(dim=1).sort().values)
-        self.register_buffer("generated_radii", generated.flatten(1).norm(dim=1).sort().values)
-        return {"name": type(self).__name__, "n_reference": len(reference), "n_generated": len(generated)}
-
-    def raw_potential(self, x: torch.Tensor) -> torch.Tensor:
-        radii = x.flatten(1).norm(dim=1)
-
-        def log_survival(samples: torch.Tensor) -> torch.Tensor:
-            samples = samples.to(radii)
-            counts = len(samples) - torch.searchsorted(samples, radii.contiguous())
-            # Half an empirical count keeps the logarithm finite beyond the largest observed radius.
-            return (counts / len(samples)).clamp_min(0.5 / len(samples)).log()
-
-        return log_survival(self.reference_radii) - log_survival(self.generated_radii)
 
 
 class DensityRatioPotential(Potential):

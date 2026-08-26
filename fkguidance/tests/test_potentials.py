@@ -1,21 +1,11 @@
 import torch
 from torch.utils.data import TensorDataset
-from fkguidance import DensityRatioPotential, RadialSurvivalPotential, binary_datasets
+from fkguidance import DensityRatioPotential
 
 
 class Identity(torch.nn.Module):
     def forward(self, x):
         return x
-
-
-def test_radial_survival_potential_rewards_missing_tail():
-    generated = torch.linspace(0, 1, 100).unsqueeze(1)
-    reference = torch.linspace(0, 2, 100).unsqueeze(1)
-    potential = RadialSurvivalPotential(clip=5)
-    results = potential.fit(binary_datasets(reference, generated))
-
-    assert results["n_reference"] == 80
-    assert potential(torch.tensor([[1.5]])) > potential(torch.tensor([[0.5]]))
 
 
 def test_relative_density_ratio_is_bounded():
