@@ -27,6 +27,22 @@ def test_tune_guidance_scale_selects_a_metric_and_optionally_returns_trials():
     assert trials == {0.5: 0.5, 1.0: 1.0, 2.0: 2.0}
 
 
+def test_tune_guidance_scale_uses_successive_budgets_and_keeps_the_first_round():
+    calls = []
+
+    def run(scale, budget):
+        calls.append((scale, budget))
+        return {"error": abs(scale - 2.0), "budget": budget}
+
+    best_scale, trials = tune_guidance_scale((0.5, 1.0, 2.0, 4.0), run, "error",
+                                             budgets=(10, 30, 100), return_trials=True)
+
+    assert best_scale == 2.0
+    assert len(calls) == 7
+    assert set(trials) == {0.5, 1.0, 2.0, 4.0}
+    assert {trial["budget"] for trial in trials.values()} == {10}
+
+
 def test_log_h_dataset_includes_the_exact_terminal_condition():
     terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
 

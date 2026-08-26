@@ -189,26 +189,31 @@ def make_guidance(log_reward_model: torch.nn.Module, scale: float = 1.0) -> Call
     return guidance
 
 
-def tune_guidance_scale(scales, run_scale: Callable[[float], Any], metric: str | Callable[[Any], float], *,
-                        direction: str = "min", return_trials: bool = False) -> tuple[float, Any]:
-    """Run a discrete scale search and return the best run or every trial."""
+def tune_guidance_scale(scales, run_scale: Callable[..., Any], metric: str | Callable[[Any], float], *,
+                        direction: str = "min", budgets=None, return_trials: bool = False) -> tuple[float, Any]:
+    """Select a scale, optionally eliminating half the candidates at increasing budgets."""
     scales = tuple(float(scale) for scale in scales)
     if not scales or len(scales) != len(set(scales)) or any(not math.isfinite(scale) for scale in scales):
         raise ValueError("scales must be a non-empty sequence of distinct finite values")
     if direction not in {"min", "max"}:
         raise ValueError("direction must be 'min' or 'max'")
+    if budgets is not None:
+        budgets = tuple(int(budget) for budget in budgets)
+        if not budgets or any(budget <= 0 for budget in budgets) or any(a >= b for a, b in zip(budgets, budgets[1:])):
+            raise ValueError("budgets must be a non-empty increasing sequence of positive integers")
 
     score = (lambda result: result[metric]) if isinstance(metric, str) else metric
-    trials = {}
-    best_scale, best_result, best_value = scales[0], None, None
-    for scale in scales:
-        result = run_scale(scale)
-        value = float(score(result))
-        if not math.isfinite(value):
-            raise ValueError(f"metric is not finite for guidance scale {scale:g}")
-        if return_trials:
-            trials[scale] = result
-        if best_value is None or (value < best_value if direction == "min" else value > best_value):
-            best_scale, best_result, best_value = scale, result, value
+    candidates, first_trials = scales, None
+    for round_index, budget in enumerate((None,) if budgets is None else budgets):
+        trials = {scale: run_scale(scale) if budget is None else run_scale(scale, budget) for scale in candidates}
+        values = {scale: float(score(result)) for scale, result in trials.items()}
+        if any(not math.isfinite(value) for value in values.values()):
+            raise ValueError("guidance-scale metric must be finite")
+        first_trials = trials if first_trials is None else first_trials
+        reverse = direction == "max"
+        ranked = sorted(candidates, key=values.__getitem__, reverse=reverse)
+        n_keep = 1 if budget is None or round_index == len(budgets) - 1 else max(1, len(ranked) // 2)
+        candidates = tuple(ranked[:n_keep])
 
-    return best_scale, trials if return_trials else best_result
+    best_scale = candidates[0]
+    return best_scale, first_trials if return_trials else trials[best_scale]
