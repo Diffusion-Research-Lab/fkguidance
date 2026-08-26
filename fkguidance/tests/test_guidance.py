@@ -43,6 +43,18 @@ def test_tune_guidance_scale_uses_successive_budgets_and_keeps_the_first_round()
     assert {trial["budget"] for trial in trials.values()} == {10}
 
 
+def test_tune_guidance_scale_refines_promising_log_scale_regions():
+    def run(scale, budget):
+        return {"error": abs(math.log(scale / 4)), "budget": budget}
+
+    best_scale, rounds = tune_guidance_scale((1, 4, 16, 64), run, "error", budgets=(10, 30, 100),
+                                             n_keep=(1, 2), refine=True, return_rounds=True)
+
+    assert best_scale == 4
+    assert [len(round_) for round_ in rounds] == [4, 3, 2]
+    assert set(rounds[1]) == {2, 4, 8}
+
+
 def test_log_h_dataset_includes_the_exact_terminal_condition():
     terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
 
