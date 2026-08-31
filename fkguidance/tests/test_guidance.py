@@ -1,20 +1,27 @@
 import math
 import torch
-from fkguidance import LogRewardMLP, Potential, binary_datasets, fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
+from fkguidance import LogRewardMLP, binary_datasets, fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
 from fkguidance.guidance import _log_h_dataset, _log_reward_loss
 
 
-class CoordinatePotential(Potential):
-    def raw_potential(self, x):
+class CoordinatePotential(torch.nn.Module):
+    def fit(self, datasets, **kwargs):
+        return {"name": type(self).__name__}
+
+    def forward(self, x):
         return x[:, 0]
 
 
-def test_terminal_probabilities_mix_uniform_and_potential_bias():
+def test_terminal_probabilities_mix_base_and_tilted_distributions():
     terminals = torch.tensor([[0.0], [1.0], [2.0]])
-    probabilities = terminal_probabilities(CoordinatePotential(), terminals, beta=0.5, eta=2.0)
-    assert torch.isclose(probabilities.sum(), torch.tensor(1.0))
-    assert torch.all(probabilities >= 0.5 / 3)
-    assert probabilities[2] > probabilities[1] > probabilities[0]
+    potential = CoordinatePotential()
+    base = terminal_probabilities(potential, terminals, gamma=2.0, beta=0.0)
+    tilted = terminal_probabilities(potential, terminals, gamma=2.0, beta=1.0)
+    mixture = terminal_probabilities(potential, terminals, gamma=2.0, beta=0.5)
+
+    assert torch.allclose(base, torch.full((3,), 1 / 3))
+    assert torch.allclose(tilted, torch.softmax(2 * terminals[:, 0], dim=0))
+    assert torch.allclose(mixture, (base + tilted) / 2)
 
 
 def test_tune_guidance_scale_selects_a_metric_and_optionally_returns_trials():
@@ -55,8 +62,8 @@ def test_tune_guidance_scale_refines_promising_log_scale_regions():
     assert set(rounds[1]) == {2, 4, 8}
 
 
-def test_log_h_dataset_includes_the_exact_terminal_condition():
-    terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
+def test_log_h_dataset_uses_half_cosine_times_and_continuations():
+    terminals = torch.linspace(-1, 1, 100).unsqueeze(1)
 
     def forward_noise(values, times, context):
         return values + times[:, None]
@@ -65,16 +72,14 @@ def test_log_h_dataset_includes_the_exact_terminal_condition():
         return torch.stack((states, states + 2), dim=1)
 
     dataset = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
-                             n_states=10, n_continuations=2, gamma=1.0, beta=0.5, eta=1.0,
-                             time_group_size=3, device="cpu", seed=0, split="train")
+                             n_states=100, n_continuations=2, gamma=1.0, beta=1.0,
+                             time_group_size=1, device="cpu", seed=0, split="train")
     states, times, log_h_targets = dataset.tensors
-    terminal = times == 1
 
-    assert terminal.sum() == 2
-    expected = states[:, 0].clone()
-    expected[~terminal] += torch.logsumexp(torch.tensor([0.0, 2.0]), dim=0) - math.log(2)
+    expected = states[:, 0] + torch.logsumexp(torch.tensor([0.0, 2.0]), dim=0) - math.log(2)
     assert torch.allclose(log_h_targets, expected)
-    assert len(times.unique()) == 4
+    assert torch.all((0 <= times) & (times < 1))
+    assert 0.55 < times.mean() < 0.72
 
 
 def test_log_reward_loss_targets_log_mean_exponential():
@@ -125,7 +130,6 @@ def test_fit_guidance_uses_independent_continuations():
         time_group_size=10,
     )
     assert isinstance(potential, CoordinatePotential)
-    assert results["log_reward"]["objective"] == "exponential_log_reward"
-    assert results["log_reward"]["n_continuations"] == 3
+    assert set(results["log_reward"]) == {"selected", "trials", "training", "test_loss"}
     assert results["log_reward"]["test_loss"] >= 0
     assert model(torch.zeros(2, 1), torch.zeros(2)).shape == (2,)

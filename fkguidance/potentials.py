@@ -1,6 +1,5 @@
-"""Terminal potentials defining a target distribution correction."""
+"""Terminal potential estimated from reference and generated samples."""
 
-from abc import ABC, abstractmethod
 import math
 from typing import Any
 import torch
@@ -8,51 +7,28 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from .training import evaluate, select_parameters, train
 
 
-__all__ = ["DensityRatioPotential", "Potential"]
+__all__ = ["DensityRatioPotential"]
 
 
-class Potential(torch.nn.Module, ABC):
-    """A scalar terminal potential tau used to define the F-K log reward."""
-
-    def __init__(self, clip: float = 10.0) -> None:
-        super().__init__()
-        if not math.isfinite(clip) or clip <= 0:
-            raise ValueError("clip must be finite and positive")
-        self.clip = float(clip)
-
-    def fit(self, datasets: tuple[Dataset, Dataset, Dataset], **kwargs) -> dict[str, Any]:
-        """Fit data-dependent state, if any."""
-        return {"name": type(self).__name__}
-
-    @abstractmethod
-    def raw_potential(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        values = self.raw_potential(x)
-        if values.shape != (len(x),):
-            raise ValueError(f"potential shape {tuple(values.shape)} does not match {(len(x),)}")
-        return values.clamp(-self.clip, self.clip)
-
-
-class DensityRatioPotential(Potential):
+class DensityRatioPotential(torch.nn.Module):
     """Estimate a log density ratio in a supplied embedding with a balanced classifier.
 
     Reference samples have label one. With equal class priors, the classifier logit estimates
-    log(p_reference / p_generated), or its relative-density-ratio counterpart when alpha is given.
-    Optional Gaussian feature noise estimates the corresponding ratio of smoothed distributions.
+    log(p_reference / p_generated). Optional Gaussian feature noise estimates the ratio between
+    smoothed distributions.
     """
 
-    def __init__(self, embedding: torch.nn.Module, output_dim: int, relative_alpha: float | None = None,
-                 smoothing_std: float = 0.0, hidden_dim: int = 128, **kwargs) -> None:
-        super().__init__(**kwargs)
-        if relative_alpha is not None and not 0 < relative_alpha < 1:
-            raise ValueError("relative_alpha must lie in (0, 1)")
+    def __init__(self, embedding: torch.nn.Module, output_dim: int, smoothing_std: float = 0.0,
+                 hidden_dim: int = 128, clip: float = 10.0) -> None:
+        super().__init__()
         if not math.isfinite(smoothing_std) or smoothing_std < 0:
             raise ValueError("smoothing_std must be finite and non-negative")
+        if not math.isfinite(clip) or clip <= 0:
+            raise ValueError("clip must be finite and positive")
+
         self.embedding = embedding
-        self.relative_alpha = relative_alpha
         self.smoothing_std = float(smoothing_std)
+        self.clip = float(clip)
         self.head = torch.nn.Sequential(torch.nn.Linear(output_dim, hidden_dim), torch.nn.SiLU(),
                                         torch.nn.Linear(hidden_dim, 1), torch.nn.Flatten(0))
 
@@ -70,7 +46,7 @@ class DensityRatioPotential(Potential):
 
     def _classification_dataset(self, dataset: TensorDataset, feature_scale: torch.Tensor,
                                 seed: int) -> TensorDataset:
-        """Build a balanced reference-versus-generated-or-mixture dataset."""
+        """Build a balanced generated-versus-reference feature dataset."""
         features, targets = dataset.tensors
         reference, generated = features[targets.bool()], features[~targets.bool()]
         n_samples = min(len(reference), len(generated))
@@ -78,15 +54,7 @@ class DensityRatioPotential(Potential):
 
         reference = reference[torch.randperm(len(reference), generator=generator)[:n_samples]]
         generated = generated[torch.randperm(len(generated), generator=generator)[:n_samples]]
-
-        if self.relative_alpha is None:
-            negative = generated
-        else:
-            n_reference = round(self.relative_alpha * n_samples)
-            negative = torch.cat((reference[:n_reference], generated[:n_samples - n_reference]))
-            negative = negative[torch.randperm(n_samples, generator=generator)]
-
-        features = torch.cat((negative, reference))
+        features = torch.cat((generated, reference))
         if self.smoothing_std:
             noise = torch.randn(features.shape, generator=generator, dtype=features.dtype)
             features = features + self.smoothing_std * feature_scale * noise
@@ -137,16 +105,12 @@ class DensityRatioPotential(Potential):
         correct = (logits >= 0) == targets
         self.cpu()
 
-        return {"name": type(self).__name__, "relative_alpha": self.relative_alpha,
-                "smoothing_std": self.smoothing_std, "selected": selected,
+        return {"name": type(self).__name__, "smoothing_std": self.smoothing_std, "selected": selected,
                 "trials": trials, "training": history,
                 "test": {"loss": test_loss, "accuracy": float(correct.float().mean()),
                          "generated_accuracy": float(correct[~targets].float().mean()),
                          "reference_accuracy": float(correct[targets].float().mean())}}
 
-    def raw_potential(self, x: torch.Tensor) -> torch.Tensor:
-        logits = self.head(self.embedding(x))
-        if self.relative_alpha is not None:
-            # The exact relative ratio is at most 1 / alpha; enforce that bound on its learned estimate.
-            logits = logits.clamp_max(-math.log(self.relative_alpha))
-        return logits
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate the clipped terminal potential tau(x)."""
+        return self.head(self.embedding(x)).clamp(-self.clip, self.clip)

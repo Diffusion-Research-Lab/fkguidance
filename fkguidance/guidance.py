@@ -6,7 +6,7 @@ import math
 from typing import Any
 import torch
 from torch.utils.data import Dataset, TensorDataset
-from .potentials import Potential
+from .potentials import DensityRatioPotential
 from .training import evaluate, select_parameters, train
 
 
@@ -14,7 +14,6 @@ __all__ = ["fit_guidance", "make_guidance", "terminal_probabilities", "tune_guid
 
 
 logger = logging.getLogger(__name__)
-_TERMINAL_FRACTION = 0.2
 
 
 def _log_reward_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -23,41 +22,32 @@ def _log_reward_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Te
 
 
 @torch.inference_mode()
-def terminal_probabilities(potential: Potential, terminals: torch.Tensor, *, beta: float = 0.5,
-                           eta: float = 1.0, batch_size: int = 1024,
+def terminal_probabilities(potential: DensityRatioPotential, terminals: torch.Tensor, *, gamma: float = 1.0,
+                           beta: float = 1.0, batch_size: int = 1024,
                            device: str | torch.device = "cpu") -> torch.Tensor:
-    """Mix uniform terminal sampling with a softmax biased toward large tau values."""
-    if not 0 <= beta <= 1 or eta < 0:
-        raise ValueError("beta must lie in [0, 1] and eta must be non-negative")
+    """Sample from (1 - beta) p_theta + beta p_theta exp(gamma tau) / Z."""
+    if not math.isfinite(gamma) or gamma <= 0 or not 0 <= beta <= 1:
+        raise ValueError("gamma must be positive and beta must lie in [0, 1]")
 
     potential.to(device).eval()
     values = torch.cat([potential(terminals[start:start + batch_size].to(device)).cpu()
                         for start in range(0, len(terminals), batch_size)])
 
-    # The uniform component preserves broad coverage; eta controls the bias toward deficient regions.
-    biased = torch.softmax(eta * values.double(), dim=0)
-    return ((1 - beta) / len(values) + beta * biased).float()
+    tilted = torch.softmax(gamma * values.double(), dim=0)
+    return ((1 - beta) / len(values) + beta * tilted).float()
 
 
 @torch.inference_mode()
-def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential: Potential,
+def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential: DensityRatioPotential,
                    forward_noise: Callable, continue_from: Callable, *, n_states: int, n_continuations: int,
-                   gamma: float, beta: float, eta: float, time_group_size: int, device: str | torch.device,
+                   gamma: float, beta: float, time_group_size: int, device: str | torch.device,
                    seed: int, split: str) -> TensorDataset:
     """Build (X_t, t, log h) observations from terminal samples and stochastic continuations."""
-    probabilities = terminal_probabilities(potential, terminals, beta=beta, eta=eta, device=device)
+    probabilities = terminal_probabilities(potential, terminals, gamma=gamma, beta=beta, device=device)
     generator = torch.Generator().manual_seed(seed)
     indices = torch.multinomial(probabilities, n_states, replacement=True, generator=generator)
-
-    # Exact terminal observations impose log h(x, 1) = gamma tau(x).
-    n_terminal = max(1, int(_TERMINAL_FRACTION * n_states))
-    terminal_indices, indices = indices[:n_terminal], indices[n_terminal:]
-    terminal_states = terminals[terminal_indices]
-    terminal_tau = potential(terminal_states.to(device)).cpu()
-    states = [terminal_states.cpu()]
-    times = [torch.ones(n_terminal)]
-    log_h_targets = [gamma * terminal_tau]
     selected_context = None if context is None else context[indices]
+    states, times, log_h_targets = [], [], []
 
     n_batches = math.ceil(len(indices) / time_group_size)
     n_reports = 4 if split == "train" else 1
@@ -67,8 +57,9 @@ def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potent
         batch_indices = indices[start:start + time_group_size]
         batch_context = None if selected_context is None else selected_context[start:start + time_group_size]
 
-        # One continuously sampled time per batch keeps restart samplers vectorized without introducing a fixed grid.
-        time = torch.full((len(batch_indices),), float(torch.rand((), generator=generator)))
+        # The half-cosine law emphasizes the difficult near-terminal region without introducing a parameter.
+        time_value = torch.sin(torch.rand((), generator=generator) * math.pi / 2).item()
+        time = torch.full((len(batch_indices),), time_value)
         state = forward_noise(terminals[batch_indices], time, batch_context)
         continuations = continue_from(state, time, n_continuations, batch_context)
 
@@ -83,25 +74,25 @@ def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potent
 
         if batch_index % log_every == 0 or batch_index == n_batches:
             logger.info("log h targets | %s | %d/%d states", split,
-                        min(n_terminal + start + time_group_size, n_states), n_states)
+                        min(start + time_group_size, n_states), n_states)
 
     return TensorDataset(torch.cat(states), torch.cat(times), torch.cat(log_h_targets))
 
 
-def fit_guidance(potential: Potential, log_reward_model: torch.nn.Module,
+def fit_guidance(potential: DensityRatioPotential, log_reward_model: torch.nn.Module,
                  terminal_datasets: tuple[Dataset, Dataset, Dataset], terminal_pool: torch.Tensor,
                  forward_noise: Callable, continue_from: Callable, *, context: torch.Tensor | None = None,
-                 n_states: int, n_continuations: int, gamma: float = 1.0, beta: float = 0.5, eta: float = 1.0,
+                 n_states: int, n_continuations: int, gamma: float = 1.0, beta: float = 1.0,
                  potential_kwargs: dict[str, Any] | None = None, training_kwargs: dict[str, Any],
                  pilot_kwargs: dict[str, Any] | None = None, time_group_size: int = 256,
-                 device: str | torch.device = "cpu", seed: int = 0) -> tuple[Potential, torch.nn.Module, dict]:
-    """Fit tau, construct Monte Carlo targets for log h, and fit u_phi = log h."""
+                 device: str | torch.device = "cpu", seed: int = 0) -> tuple[DensityRatioPotential, torch.nn.Module, dict]:
+    """Fit tau, construct Monte Carlo targets for log h, and fit v_phi = log h."""
     if min(len(terminal_pool), n_states, n_continuations, time_group_size) <= 0:
         raise ValueError("pool and sample counts must be positive")
     if context is not None and len(context) != len(terminal_pool):
         raise ValueError("context and terminal pool must have equal length")
-    if not math.isfinite(gamma) or gamma <= 0:
-        raise ValueError("gamma must be finite and positive")
+    if not math.isfinite(gamma) or gamma <= 0 or not 0 <= beta <= 1:
+        raise ValueError("gamma must be positive and beta must lie in [0, 1]")
 
     # tau is either analytic or learned from reference and generated terminal samples.
     logger.info("tau | fit | start | %s", type(potential).__name__, extra={"core_step": True})
@@ -117,8 +108,8 @@ def fit_guidance(potential: Potential, log_reward_model: torch.nn.Module,
 
     # Keep terminal-pool splits disjoint before drawing terminal samples, states, and continuations.
     logger.info("log h targets | start | states=%d | time_group=%d | continuations/state=%d | "
-                "gamma=%.3g | terminal_beta=%.3g | terminal_eta=%.3g", n_states, time_group_size,
-                n_continuations, gamma, beta, eta, extra={"core_step": True})
+                "gamma=%.3g | beta=%.3g", n_states, time_group_size, n_continuations, gamma, beta,
+                extra={"core_step": True})
     order = torch.randperm(len(terminal_pool), generator=torch.Generator().manual_seed(seed))
     pool_bounds = (0, int(0.8 * len(order)), int(0.9 * len(order)), len(order))
     state_counts = (int(0.8 * n_states), int(0.1 * n_states), n_states - int(0.9 * n_states))
@@ -130,7 +121,7 @@ def fit_guidance(potential: Potential, log_reward_model: torch.nn.Module,
         indices = order[start:stop]
         split_context = None if context is None else context[indices]
         dataset = _log_h_dataset(terminal_pool[indices], split_context, potential, forward_noise, continue_from,
-                                 n_states=count, n_continuations=n_continuations, gamma=gamma, beta=beta, eta=eta,
+                                 n_states=count, n_continuations=n_continuations, gamma=gamma, beta=beta,
                                  time_group_size=time_group_size, device=device, seed=seed + split_index, split=split)
         datasets.append(dataset)
 
@@ -169,17 +160,13 @@ def fit_guidance(potential: Potential, log_reward_model: torch.nn.Module,
 
     return potential.cpu(), log_reward_model, {
         "potential": potential_results,
-        "log_reward": {"objective": "exponential_log_reward", "gamma": gamma,
-                       "terminal_beta": beta, "terminal_eta": eta,
-                       "n_states": n_states, "n_continuations": n_continuations,
-                       "terminal_fraction": _TERMINAL_FRACTION, "time_group_size": time_group_size,
-                       "centering": float(centering), "selected": selected, "trials": trials,
+        "log_reward": {"selected": selected, "trials": trials,
                        "training": history, "test_loss": test_loss},
     }
 
 
 def make_guidance(log_reward_model: torch.nn.Module, scale: float = 1.0) -> Callable:
-    """Return the guidance vector V(x, t) = scale * grad_x u_phi(x, t)."""
+    """Return the guidance vector V(x, t) = scale * grad_x v_phi(x, t)."""
     def guidance(x: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
         with torch.enable_grad():
             inputs = x.detach().requires_grad_(True)
