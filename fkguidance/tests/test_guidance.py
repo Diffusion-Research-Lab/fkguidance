@@ -82,6 +82,28 @@ def test_log_h_dataset_uses_half_cosine_times_and_continuations():
     assert 0.55 < times.mean() < 0.72
 
 
+def test_log_h_dataset_allows_guided_continuations():
+    class QuadraticLogReward(torch.nn.Module):
+        def forward(self, x, time):
+            return x.square().sum(dim=1)
+
+    terminals = torch.linspace(-1, 1, 10).unsqueeze(1)
+    guidance = make_guidance(QuadraticLogReward())
+
+    def forward_noise(values, times, context):
+        return values
+
+    def continue_from(states, times, n_continuations, context):
+        guided = states + guidance(states, times)
+        return guided[:, None].expand(-1, n_continuations, -1)
+
+    dataset = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
+                             n_states=4, n_continuations=2, gamma=1.0, beta=0.0,
+                             time_group_size=2, device="cpu", seed=0, split="train")
+
+    assert len(dataset) == 4
+
+
 def test_log_reward_loss_targets_log_mean_exponential():
     targets = torch.tensor([-2.0, 0.0, 1.0], requires_grad=True)
     prediction = (torch.logsumexp(targets.detach(), dim=0) - math.log(len(targets))).requires_grad_()

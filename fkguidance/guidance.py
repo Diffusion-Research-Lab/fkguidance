@@ -37,7 +37,7 @@ def terminal_probabilities(potential: DensityRatioPotential, terminals: torch.Te
     return ((1 - beta) / len(values) + beta * tilted).float()
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def _log_h_dataset(terminals: torch.Tensor, context: torch.Tensor | None, potential: DensityRatioPotential,
                    forward_noise: Callable, continue_from: Callable, *, n_states: int, n_continuations: int,
                    gamma: float, beta: float, time_group_size: int, device: str | torch.device,
