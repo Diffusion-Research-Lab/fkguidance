@@ -1,3 +1,9 @@
 # fkguidance
 
-`fkguidance` learns post-training Feynman-Kac guidance for a stochastic generative process. A user supplies a terminal potential, a generated terminal pool, forward noising, and stochastic continuation callbacks.
+Post-training Feynman–Kac guidance for stochastic generative models. Supply a terminal potential, generated endpoints, forward noising, and continuation callbacks.
+
+Initialize the official CTSM-v dependency before using `ConditionalPathPotential`:
+
+```bash
+git submodule update --init vendor/dre_prob_paths
+```
