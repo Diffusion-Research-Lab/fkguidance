@@ -29,10 +29,13 @@ def evaluate(model: torch.nn.Module, dataset: Dataset, batch_size: int, loss_fn:
 def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Dataset, *, n_epochs: int = 100,
           batch_size: int = 128, learning_rate: float = 1e-3, weight_decay: float = 1e-4,
           learning_rate_half_life: float = 32.0, loss_fn: Callable = torch.nn.functional.mse_loss,
-          device: str | torch.device = "cpu", seed: int = 0, label: str = "model") -> dict[str, Any]:
-    """Train a model and restore its best validation state."""
+          device: str | torch.device = "cpu", seed: int = 0, label: str = "model",
+          patience: int | None = None) -> dict[str, Any]:
+    """Train a model, optionally stop after stale validation epochs, and restore its best state."""
     if min(n_epochs, batch_size) <= 0 or min(len(train_dataset), len(validation_dataset)) <= 0:
         raise ValueError("epochs, batch size, and dataset sizes must be positive")
+    if patience is not None and patience <= 0:
+        raise ValueError("patience must be positive")
 
     torch.manual_seed(seed)
     model.to(device)
@@ -41,7 +44,7 @@ def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Da
     loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                         generator=torch.Generator().manual_seed(seed))
     history = {"train_loss": [], "validation_loss": [], "gradient_norm": []}
-    best_loss, best_epoch, best_state = math.inf, 0, None
+    best_loss, best_epoch, best_state, stale_epochs = math.inf, 0, None, 0
     log_every = max(5, math.ceil(n_epochs / 8))
 
     for epoch in range(n_epochs):
@@ -67,11 +70,18 @@ def train(model: torch.nn.Module, train_dataset: Dataset, validation_dataset: Da
         if validation_loss < best_loss:
             best_loss, best_epoch = validation_loss, epoch + 1
             best_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
         if (epoch + 1) % log_every == 0 or epoch + 1 == n_epochs:
             logger.info("%s fit | epoch %d/%d | train_loss=%.6g | validation_loss=%.6g | grad_norm=%.6g | lr=%.3g",
                         label, epoch + 1, n_epochs, train_loss, validation_loss, history["gradient_norm"][-1],
                         optimizer.param_groups[0]["lr"])
         scheduler.step()
+        if patience is not None and stale_epochs >= patience:
+            logger.info("%s fit | early stop | epoch=%d | best_epoch=%d | validation_loss=%.6g",
+                        label, epoch + 1, best_epoch, best_loss)
+            break
 
     model.load_state_dict(best_state)
     return {"best_epoch": best_epoch, **history}

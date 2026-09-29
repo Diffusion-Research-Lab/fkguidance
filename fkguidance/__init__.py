@@ -2,14 +2,19 @@
 
 from .data import binary_datasets, split_tensors
 from .guidance import fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
-from .models import LogRewardCNN, LogRewardMLP
-from .potentials import DensityRatioPotential
+from .models import CNNEncoder, LowRankLogReward, LowRankLogRewardCNN, LowRankLogRewardMLP, MLPEncoder
+from .potentials import ConditionalPathPotential, ConfidenceRatioPotential, DensityRatioPotential
 
 
 __all__ = [
+    "ConfidenceRatioPotential",
+    "ConditionalPathPotential",
     "DensityRatioPotential",
-    "LogRewardCNN",
-    "LogRewardMLP",
+    "CNNEncoder",
+    "LowRankLogReward",
+    "LowRankLogRewardCNN",
+    "LowRankLogRewardMLP",
+    "MLPEncoder",
     "binary_datasets",
     "fit_guidance",
     "make_guidance",

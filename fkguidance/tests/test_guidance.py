@@ -1,6 +1,6 @@
 import math
 import torch
-from fkguidance import LogRewardMLP, binary_datasets, fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
+from fkguidance import LowRankLogRewardMLP, binary_datasets, fit_guidance, make_guidance, terminal_probabilities, tune_guidance_scale
 from fkguidance.guidance import _log_h_dataset, _log_reward_loss
 
 
@@ -15,9 +15,9 @@ class CoordinatePotential(torch.nn.Module):
 def test_terminal_probabilities_mix_base_and_tilted_distributions():
     terminals = torch.tensor([[0.0], [1.0], [2.0]])
     potential = CoordinatePotential()
-    base = terminal_probabilities(potential, terminals, gamma=2.0, beta=0.0)
-    tilted = terminal_probabilities(potential, terminals, gamma=2.0, beta=1.0)
-    mixture = terminal_probabilities(potential, terminals, gamma=2.0, beta=0.5)
+    base = terminal_probabilities(potential, terminals, eta=2.0, beta=0.0)
+    tilted = terminal_probabilities(potential, terminals, eta=2.0, beta=1.0)
+    mixture = terminal_probabilities(potential, terminals, eta=2.0, beta=0.5)
 
     assert torch.allclose(base, torch.full((3,), 1 / 3))
     assert torch.allclose(tilted, torch.softmax(2 * terminals[:, 0], dim=0))
@@ -71,15 +71,21 @@ def test_log_h_dataset_uses_half_cosine_times_and_continuations():
     def continue_from(states, times, n_continuations, context):
         return torch.stack((states, states + 2), dim=1)
 
-    dataset = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
-                             n_states=100, n_continuations=2, gamma=1.0, beta=1.0,
-                             time_group_size=1, device="cpu", seed=0, split="train")
+    dataset, selection = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
+                                        n_states=100, n_continuations=2, gamma=1.0, eta=0.0, beta=1.0,
+                                        time_group_size=1, device="cpu", seed=0, split="train")
     states, times, log_h_targets = dataset.tensors
 
-    expected = states[:, 0] + torch.logsumexp(torch.tensor([0.0, 2.0]), dim=0) - math.log(2)
+    terminal = times == 1
+    expected = states[:, 0]
+    expected[~terminal] += torch.logsumexp(torch.tensor([0.0, 2.0]), dim=0) - math.log(2)
     assert torch.allclose(log_h_targets, expected)
-    assert torch.all((0 <= times) & (times < 1))
-    assert 0.55 < times.mean() < 0.72
+    assert terminal.sum() == 25
+    assert torch.all((0 <= times[~terminal]) & (times[~terminal] < 1))
+    assert 0.55 < times[~terminal].mean() < 0.72
+    assert math.isclose(selection["ess"], 100)
+    assert math.isclose(selection["ess_fraction"], 1)
+    assert math.isclose(selection["terminal_fraction"], 0.25)
 
 
 def test_log_h_dataset_allows_guided_continuations():
@@ -97,9 +103,9 @@ def test_log_h_dataset_allows_guided_continuations():
         guided = states + guidance(states, times)
         return guided[:, None].expand(-1, n_continuations, -1)
 
-    dataset = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
-                             n_states=4, n_continuations=2, gamma=1.0, beta=0.0,
-                             time_group_size=2, device="cpu", seed=0, split="train")
+    dataset, _ = _log_h_dataset(terminals, None, CoordinatePotential(), forward_noise, continue_from,
+                                n_states=4, n_continuations=2, gamma=1.0, eta=1.0, beta=0.0,
+                                time_group_size=2, device="cpu", seed=0, split="train")
 
     assert len(dataset) == 4
 
@@ -141,7 +147,7 @@ def test_fit_guidance_uses_independent_continuations():
 
     potential, model, results = fit_guidance(
         CoordinatePotential(),
-        LogRewardMLP(1, hidden_dim=8, depth=1),
+        LowRankLogRewardMLP(1, hidden_dim=8, depth=1, rank=4),
         terminal_datasets,
         generated,
         forward_noise,
@@ -152,6 +158,13 @@ def test_fit_guidance_uses_independent_continuations():
         time_group_size=10,
     )
     assert isinstance(potential, CoordinatePotential)
-    assert set(results["log_reward"]) == {"selected", "trials", "training", "test_loss"}
+    assert set(results["log_reward"]) == {
+        "terminal_selection", "selected", "trials", "training", "test_loss",
+        "target_diagnostics", "terminal_diagnostics"
+    }
+    assert [value["split"] for value in results["log_reward"]["terminal_selection"]] == ["train", "validation", "test"]
+    assert all(value["eta"] == 1 for value in results["log_reward"]["terminal_selection"])
     assert results["log_reward"]["test_loss"] >= 0
+    assert results["log_reward"]["target_diagnostics"]["test"]["std"] >= 0
+    assert results["log_reward"]["terminal_diagnostics"]["samples"] == 6
     assert model(torch.zeros(2, 1), torch.zeros(2)).shape == (2,)

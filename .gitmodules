@@ -1,0 +1,3 @@
+[submodule "vendor/dre_prob_paths"]
+	path = vendor/dre_prob_paths
+	url = https://github.com/ksnxr/dre-prob-paths.git

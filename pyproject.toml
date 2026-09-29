@@ -9,7 +9,7 @@ description = "Post-training Feynman-Kac guidance for stochastic generative mode
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-dependencies = ["torch"]
+dependencies = ["joblib", "numpy", "scikit-learn", "scipy", "torch", "torchdiffeq"]
 
 [project.optional-dependencies]
 test = ["pytest"]
